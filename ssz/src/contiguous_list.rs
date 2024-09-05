@@ -60,6 +60,8 @@ impl<T, N> IntoIterator for ContiguousList<T, N> {
     type IntoIter = <Vec<T> as IntoIterator>::IntoIter;
 
     fn into_iter(self) -> Self::IntoIter {
+        // The explicit conversion to `Vec` will no longer be necessary starting with Rust 2024.
+        // See <https://github.com/rust-lang/rust/pull/124097/>.
         Vec::from(self.elements).into_iter()
     }
 }
