@@ -1,3 +1,9 @@
+// The `Copy` impl has a stricter `ArrayLength` bound than the struct itself.
+// `Derivative` does not deduplicate bounds. It's hard to do in a procedural macro.
+// Putting the struct bound in a `where` clause also suppresses the warning,
+// but that goes against our conventions and relies on an edge case in Clippy.
+#![allow(clippy::trait_duplication_in_bounds)]
+
 use core::{
     fmt::{Debug, Formatter, Result as FmtResult},
     marker::PhantomData,
@@ -20,14 +26,14 @@ use crate::{
     porcelain::{SszHash, SszRead, SszSize, SszWrite},
     shared,
     size::Size,
-    type_level::{ArrayLengthCopy, ContiguousVectorElements, MerkleElements},
+    type_level::{ContiguousVectorElements, MerkleElements},
 };
 
 #[derive(Deref, DerefMut, AsRef, Derivative, Serialize)]
 #[as_ref(forward)]
 #[derivative(
     Clone(bound = "T: Clone"),
-    Copy(bound = "T: Copy, N: ArrayLengthCopy<T>"),
+    Copy(bound = "T: Copy, N: ArrayLength<T, ArrayType: Copy>"),
     PartialEq(bound = "T: PartialEq"),
     Eq(bound = "T: Eq"),
     Default(bound = "T: Default"),
