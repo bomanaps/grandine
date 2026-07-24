@@ -212,7 +212,8 @@ impl<P: Preset> TestController<P> {
             anchor_state,
             Arc::new(Mutex::new(MockExecutionEngine::new(true, false, None))),
             futures::sink::drain(),
-            None,
+            false,
+            false,
         )
     }
 
@@ -223,9 +224,14 @@ impl<P: Preset> TestController<P> {
         anchor_state: Arc<BeaconState<P>>,
         execution_engine: TestExecutionEngine<P>,
         p2p_tx: impl UnboundedSink<P2pMessage<P>>,
-        thread_pool_size: Option<usize>,
+        fast_confirmation_rule: bool,
+        trust_all_signatures: bool,
     ) -> (Arc<Self>, MutatorHandle<P, WaitGroup>) {
-        let store_config = StoreConfig::aggressive(&chain_config);
+        let store_config = StoreConfig {
+            fast_confirmation_rule,
+            trust_all_signatures,
+            ..StoreConfig::aggressive(&chain_config)
+        };
 
         Self::new_internal(
             chain_config,
@@ -237,7 +243,7 @@ impl<P: Preset> TestController<P> {
             execution_engine,
             None,
             p2p_tx,
-            thread_pool_size,
+            None,
         )
     }
 

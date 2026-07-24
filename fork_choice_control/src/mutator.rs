@@ -38,9 +38,9 @@ use fork_choice_store::{
     BlobSidecarAction, BlobSidecarOrigin, BlockAction, BlockItem, BlockOrigin, ChainLink,
     DataColumnSidecarAction, DataColumnSidecarOrigin, Error, ExecutionPayloadBidAction,
     ExecutionPayloadBidOrigin, ExecutionPayloadEnvelopeAction, ExecutionPayloadEnvelopeOrigin,
-    PayloadAction, PayloadAttestationAction, PayloadAttestationItem, PayloadPresence,
-    ProposerPreferencesAction, ProposerPreferencesOrigin, StateCacheProcessor, Store,
-    ValidAttestation, ValidPayloadAttestation,
+    FastConfirmationStore, PayloadAction, PayloadAttestationAction, PayloadAttestationItem,
+    PayloadPresence, ProposerPreferencesAction, ProposerPreferencesOrigin, StateCacheProcessor,
+    Store, ValidAttestation, ValidPayloadAttestation,
 };
 use futures::channel::{mpsc::Sender as MultiSender, oneshot::Sender as OneshotSender};
 use helper_functions::{accessors, misc, predicates, verifier::NullVerifier};
@@ -111,6 +111,8 @@ pub struct Mutator<P: Preset, E, W, TS, PS, LS, NS, SS, VS> {
     pubkey_cache: Arc<PubkeyCache>,
     store: Arc<Store<P, Storage<P>>>,
     store_snapshot: Arc<ArcSwap<Store<P, Storage<P>>>>,
+    fcr_store: Option<FastConfirmationStore<P>>,
+    fcr_snapshot: Arc<ArcSwap<Option<FastConfirmationStore<P>>>>,
     state_cache: Arc<StateCacheProcessor<P>>,
     block_processor: Arc<BlockProcessor<P>>,
     event_channels: Arc<EventChannels<P>>,
@@ -169,6 +171,7 @@ where
     pub fn new(
         pubkey_cache: Arc<PubkeyCache>,
         store_snapshot: Arc<ArcSwap<Store<P, Storage<P>>>>,
+        fcr_snapshot: Arc<ArcSwap<Option<FastConfirmationStore<P>>>>,
         state_cache: Arc<StateCacheProcessor<P>>,
         block_processor: Arc<BlockProcessor<P>>,
         event_channels: Arc<EventChannels<P>>,
@@ -187,10 +190,13 @@ where
         sync_tx: SS,
         validator_tx: VS,
     ) -> Self {
+        let fcr_store = fcr_snapshot.load_full().as_ref().clone();
         Self {
             pubkey_cache,
             store: store_snapshot.load_full(),
             store_snapshot,
+            fcr_store,
+            fcr_snapshot,
             state_cache,
             block_processor,
             event_channels,
@@ -571,6 +577,65 @@ where
         let Some(changes) = self.store_mut().apply_tick(tick)? else {
             return Ok(());
         };
+
+        // FCR: run on_fast_confirmation once per slot, after past-slot attestations have been
+        // applied by `apply_tick`. Spec: `update_fast_confirmation_variables` MUST be called
+        // only once per slot; `is_slot_updated()` suppresses intra-slot tick updates.
+        if changes.is_slot_updated()
+            && let Some(fcr) = self.fcr_store.as_mut()
+        {
+            let previous_confirmed = fcr.confirmed_root();
+            let previous_slot = self
+                .store
+                .chain_link(previous_confirmed)
+                .map(ChainLink::slot)
+                .unwrap_or(0);
+
+            // Histogram timer is dropped when this scope ends, recording the FCR pass duration.
+            let timer = self
+                .metrics
+                .as_ref()
+                .map(|m| m.beacon_fast_confirmation_duration_seconds.start_timer());
+            fcr.on_fast_confirmation(&self.store);
+            drop(timer);
+
+            let current_confirmed = fcr.confirmed_root();
+            let current_confirmed_slot = self
+                .store
+                .chain_link(current_confirmed)
+                .map(ChainLink::slot)
+                .unwrap_or(0);
+            let store_slot = self.store.slot();
+
+            self.event_channels.send_fast_confirmation_event(
+                current_confirmed,
+                current_confirmed_slot,
+                store_slot,
+            );
+
+            if let Some(metrics) = self.metrics.as_ref() {
+                metrics.set_beacon_fast_confirmation_confirmed_slot(current_confirmed_slot);
+                metrics.set_beacon_fast_confirmation_confirmed_lag_slots(
+                    store_slot.saturating_sub(current_confirmed_slot),
+                );
+
+                if current_confirmed != previous_confirmed {
+                    // Advance = new confirmed is a descendant of the previous confirmed. Spec's
+                    // `find_latest_confirmed_descendant` Loop 1 and restart-to-GU both produce
+                    // descendants on the canonical chain. Anything else (reset to finalized, or
+                    // reset+advance compound after a chain reorg) signals broken synchrony.
+                    let is_advance = self
+                        .store
+                        .ancestor(current_confirmed, previous_slot)
+                        .is_some_and(|anc| anc == previous_confirmed);
+                    if is_advance {
+                        metrics.beacon_fast_confirmation_advances_total.inc();
+                    } else {
+                        metrics.beacon_fast_confirmation_resets_total.inc();
+                    }
+                }
+            }
+        }
 
         self.spawn_state_cache_prune_task(
             // preserve unfinalized fork tips if not finalized or epoch did not change
@@ -3751,7 +3816,7 @@ where
             return;
         }
 
-        let safe_block_hash = store.safe_execution_payload_hash();
+        let safe_block_hash = self.safe_execution_payload_hash();
         let finalized_block_hash = store.finalized_execution_payload_hash();
 
         let head_block_hash = if let Some(post_gloas_state) = new_head.state(store).post_gloas() {
@@ -4946,7 +5011,7 @@ where
             return;
         }
 
-        let safe_block_hash = self.store.safe_execution_payload_hash();
+        let safe_block_hash = self.safe_execution_payload_hash();
         let finalized_block_hash = self.store.finalized_execution_payload_hash();
 
         self.send_to_validator(ValidatorMessage::PrepareExecutionPayload(
@@ -5222,6 +5287,26 @@ where
     fn update_store_snapshot(&self) {
         // `ArcSwap::rcu` is not necessary here because there is only one thread mutating the store.
         self.store_snapshot.store(self.owned_store());
+        // Publish the FCR snapshot alongside the store so readers always see a consistent pair.
+        self.fcr_snapshot.store(Arc::new(self.fcr_store.clone()));
+    }
+
+    /// Returns the "safe" tag block hash from the execution payload. When FCR is enabled, this
+    /// resolves to the FCR-confirmed block's execution hash; otherwise to the justified block's.
+    /// Equivalent to `Snapshot::safe_execution_payload_hash` but operates on `Mutator`'s own
+    /// mid-flight state rather than the published snapshot.
+    fn safe_execution_payload_hash(&self) -> ExecutionBlockHash {
+        if let Some(fcr) = self.fcr_store.as_ref() {
+            return self
+                .store
+                .chain_link(fcr.confirmed_root())
+                .and_then(ChainLink::execution_block_hash)
+                .unwrap_or_default();
+        }
+        self.store
+            .justified_chain_link()
+            .and_then(ChainLink::execution_block_hash)
+            .unwrap_or_default()
     }
 
     fn spawn(&self, task: impl Spawn<P, E, W>) {

@@ -77,6 +77,7 @@
 
 pub use crate::{
     error::Error,
+    fast_confirmation::FastConfirmationStore,
     misc::{
         AggregateAndProofAction, AggregateAndProofOrigin, ApplyBlockChanges, ApplyTickChanges,
         AttestationAction, AttestationItem, AttestationOrigin, AttestationValidationError,
@@ -99,6 +100,7 @@ mod blob_cache;
 mod data_column_cache;
 mod error;
 mod execution_payload_envelope_cache;
+mod fast_confirmation;
 mod misc;
 mod segment;
 mod state_cache_processor;

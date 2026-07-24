@@ -21,6 +21,10 @@ pub struct StoreConfig {
     pub kzg_backend: KzgBackend,
     #[derivative(Default(value = "false"))]
     pub sync_without_reconstruction: bool,
+    #[derivative(Default(value = "false"))]
+    pub fast_confirmation_rule: bool,
+    #[derivative(Default(value = "false"))]
+    pub trust_all_signatures: bool,
 }
 
 impl StoreConfig {
