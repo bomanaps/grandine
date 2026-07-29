@@ -270,6 +270,7 @@ async fn run_case<P: Preset>(config: &Arc<Config>, case: Case<'_>, fast_confirma
         false,
         fast_confirmation_rule,
         trust_all_signatures,
+        fast_confirmation_rule,
     );
 
     let mut last_payload_status: Option<PayloadStatusWithBlockHash> = None;
@@ -537,6 +538,16 @@ async fn run_case<P: Preset>(config: &Arc<Config>, case: Case<'_>, fast_confirma
                 }
 
                 // FCR checks — only populated by `fast_confirmation/*` test vectors.
+                // Each `checks:` block with FCR fields corresponds to one explicit
+                // `on_fast_confirmation()` call in the pyspec. In FCR spec-test mode, FCR does
+                // NOT run automatically on tick, so we trigger it here to match pyspec exactly.
+                let has_fcr_checks = fast_confirmation_rule
+                    && (confirmed_root.is_some()
+                        || previous_epoch_observed_justified_checkpoint.is_some());
+                if has_fcr_checks {
+                    context.run_fast_confirmation();
+                }
+
                 if let Some(checkpoint) = previous_epoch_observed_justified_checkpoint {
                     context.assert_fcr_previous_epoch_observed_justified_checkpoint(checkpoint);
                 }

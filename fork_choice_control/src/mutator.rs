@@ -416,6 +416,9 @@ where
                     &block,
                     data_column_sidecars,
                 ),
+                MutatorMessage::RunFastConfirmation { wait_group } => {
+                    self.handle_run_fast_confirmation(&wait_group);
+                }
             }
         }
     }
@@ -581,7 +584,10 @@ where
         // FCR: run on_fast_confirmation once per slot, after past-slot attestations have been
         // applied by `apply_tick`. Spec: `update_fast_confirmation_variables` MUST be called
         // only once per slot; `is_slot_updated()` suppresses intra-slot tick updates.
+        // In FCR spec-test mode, FCR is suppressed here and triggered explicitly via
+        // `RunFastConfirmation` at each `checks:` step to match the pyspec's explicit call model.
         if changes.is_slot_updated()
+            && !self.store.store_config().fcr_spec_test_mode
             && let Some(fcr) = self.fcr_store.as_mut()
         {
             let previous_confirmed = fcr.confirmed_root();
@@ -1763,6 +1769,13 @@ where
         }
 
         Ok(())
+    }
+
+    fn handle_run_fast_confirmation(&mut self, _wait_group: &W) {
+        if let Some(fcr) = self.fcr_store.as_mut() {
+            fcr.on_fast_confirmation(&self.store);
+            self.update_store_snapshot();
+        }
     }
 
     #[expect(clippy::too_many_lines)]

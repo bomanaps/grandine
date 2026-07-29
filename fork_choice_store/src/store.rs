@@ -2363,7 +2363,7 @@ impl<P: Preset, S: Storage<P>> Store<P, S> {
         let selection_proof = message.selection_proof();
         let aggregate = Arc::new(message.aggregate());
 
-        match self.validate_attestation_internal(&aggregate, false)? {
+        match self.validate_attestation_internal(&aggregate, false, true)? {
             PartialAttestationAction::Accept => {}
             PartialAttestationAction::Ignore => {
                 return Ok(AggregateAndProofAction::Ignore);
@@ -2534,9 +2534,11 @@ impl<P: Preset, S: Storage<P>> Store<P, S> {
         attestation: AttestationItem<P, I>,
         skip_signatures_verification: bool,
     ) -> Result<AttestationAction<P, I>, AttestationValidationError<P, I>> {
-        match self
-            .validate_attestation_internal(&attestation.item, attestation.origin.is_from_block())
-        {
+        match self.validate_attestation_internal(
+            &attestation.item,
+            attestation.origin.is_from_block(),
+            attestation.origin.must_be_singular(),
+        ) {
             Ok(PartialAttestationAction::Accept) => {}
             Ok(PartialAttestationAction::Ignore) => {
                 return Ok(AttestationAction::Ignore(attestation));
@@ -2731,6 +2733,7 @@ impl<P: Preset, S: Storage<P>> Store<P, S> {
         &self,
         attestation: &Arc<Attestation<P>>,
         is_from_block: bool,
+        require_single_committee: bool,
     ) -> Result<PartialAttestationAction> {
         let AttestationData {
             slot,
@@ -2770,16 +2773,18 @@ impl<P: Preset, S: Storage<P>> Store<P, S> {
                     }
                 );
 
-                if let Attestation::Electra(electra_attestation) = attestation.as_ref() {
-                    let committee_indices =
-                        misc::get_committee_indices::<P>(electra_attestation.committee_bits);
+                if require_single_committee {
+                    if let Attestation::Electra(electra_attestation) = attestation.as_ref() {
+                        let committee_indices =
+                            misc::get_committee_indices::<P>(electra_attestation.committee_bits);
 
-                    ensure!(
-                        committee_indices.count() == 1,
-                        Error::AttestationFromMultipleCommittees {
-                            attestation: attestation.clone_arc()
-                        }
-                    );
+                        ensure!(
+                            committee_indices.count() == 1,
+                            Error::AttestationFromMultipleCommittees {
+                                attestation: attestation.clone_arc()
+                            }
+                        );
+                    }
                 }
             }
 
@@ -2998,7 +3003,7 @@ impl<P: Preset, S: Storage<P>> Store<P, S> {
     ) -> Result<Vec<ValidatorIndex>> {
         match attester_slashing {
             AttesterSlashing::Phase0(attester_slashing) => {
-                if origin.verify_signatures() {
+                if origin.verify_signatures() && !self.store_config.trust_all_signatures {
                     unphased::validate_attester_slashing(
                         &self.chain_config,
                         &self.pubkey_cache,
@@ -3016,7 +3021,7 @@ impl<P: Preset, S: Storage<P>> Store<P, S> {
                 }
             }
             AttesterSlashing::Electra(attester_slashing) => {
-                if origin.verify_signatures() {
+                if origin.verify_signatures() && !self.store_config.trust_all_signatures {
                     unphased::validate_attester_slashing(
                         &self.chain_config,
                         &self.pubkey_cache,
@@ -3034,7 +3039,7 @@ impl<P: Preset, S: Storage<P>> Store<P, S> {
                 }
             }
             AttesterSlashing::Gloas(attester_slashing) => {
-                if origin.verify_signatures() {
+                if origin.verify_signatures() && !self.store_config.trust_all_signatures {
                     unphased::validate_attester_slashing(
                         &self.chain_config,
                         &self.pubkey_cache,
@@ -3839,7 +3844,7 @@ impl<P: Preset, S: Storage<P>> Store<P, S> {
             },
         );
 
-        if origin.verify_signatures() {
+        if origin.verify_signatures() && !self.store_config.trust_all_signatures {
             // Verify signature with proposer key if proposer choose to self-build
             let pubkey = if builder_index == BUILDER_INDEX_SELF_BUILD {
                 *accessors::public_key(&state, block.message().proposer_index())?
@@ -5639,7 +5644,12 @@ impl<P: Preset, S: Storage<P>> Store<P, S> {
             let viable = self.is_segment_viable(segment);
 
             let mut best_descendant_of_segment = viable.then_some(*segment_id);
-            let mut best_branch_score: Option<Score> = None;
+            // When multiple branches fork from the same parent position, they must compete
+            // against each other — not each independently against the in-segment sibling.
+            // These two variables track the score of the current winning branch and the
+            // position it branched from, so we can reset when the fork point changes.
+            let mut best_branch_score = None;
+            let mut last_branch_parent_position = None;
 
             while let Some(branch_point) = branch_points.peek_mut() {
                 if branch_point.parent.segment_id != *segment_id {
@@ -5648,6 +5658,13 @@ impl<P: Preset, S: Storage<P>> Store<P, S> {
 
                 let branch_point = PeekMut::pop(branch_point);
                 let parent_position = branch_point.parent.position;
+
+                // When the fork point moves to a different position in this segment,
+                // start a fresh competition (different sibling, independent contest).
+                if Some(parent_position) != last_branch_parent_position {
+                    best_branch_score = None;
+                    last_branch_parent_position = Some(parent_position);
+                }
 
                 let next_position_in_segment = parent_position
                     .next()
@@ -5663,7 +5680,16 @@ impl<P: Preset, S: Storage<P>> Store<P, S> {
                         common_parent_balances,
                         proposer_boost,
                     ) {
-                        best_descendant_of_segment = Some(branch_point.best_descendant);
+                        let branch_score = self.score(
+                            first_branch_block,
+                            Some(common_parent_balances),
+                            proposer_boost,
+                        );
+
+                        if best_branch_score.map_or(true, |s| s < branch_score) {
+                            best_descendant_of_segment = Some(branch_point.best_descendant);
+                            best_branch_score = Some(branch_score);
+                        }
                     }
 
                     continue;
@@ -5677,11 +5703,17 @@ impl<P: Preset, S: Storage<P>> Store<P, S> {
                 let sibling_score =
                     self.score(sibling, Some(common_parent_balances), proposer_boost);
 
-                if (sibling_score < branch_point_score || sibling.is_invalid())
-                    && best_branch_score.is_none_or(|score| score < branch_point_score)
-                {
-                    best_branch_score = Some(branch_point_score);
+                // If a previous branch at this position already beat the sibling, the new
+                // branch must beat that winner — not just beat the sibling again.
+                let branch_wins = if let Some(current_best) = best_branch_score {
+                    current_best < branch_point_score
+                } else {
+                    sibling_score < branch_point_score || sibling.is_invalid()
+                };
+
+                if branch_wins {
                     best_descendant_of_segment = Some(branch_point.best_descendant);
+                    best_branch_score = Some(branch_point_score);
                 }
             }
 
@@ -6820,7 +6852,9 @@ impl<P: Preset, S: Storage<P>> Store<P, S> {
                     proposer_score,
                     support_discount,
                     // Per the optimistic sync spec, a block must have VALID payload to be confirmable.
-                    is_valid: !cl.is_optimistic(),
+                    // In test mode (trust_all_signatures), the mock EL never responds, so blocks
+                    // stay Optimistic indefinitely. Treat them as valid to allow FCR spec tests to run.
+                    is_valid: !cl.is_optimistic() || self.store_config.trust_all_signatures,
                     byzantine_threshold: self.chain_config.confirmation_byzantine_threshold,
                 })
             })

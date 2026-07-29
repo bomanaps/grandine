@@ -25,6 +25,11 @@ pub struct StoreConfig {
     pub fast_confirmation_rule: bool,
     #[derivative(Default(value = "false"))]
     pub trust_all_signatures: bool,
+    /// When `true`, FCR does NOT run automatically on tick; it must be triggered explicitly via
+    /// `Controller::run_fast_confirmation()`. Used in FCR spec tests to mirror the pyspec model
+    /// where `on_fast_confirmation` is called once per `checks:` step, not once per slot tick.
+    #[derivative(Default(value = "false"))]
+    pub fcr_spec_test_mode: bool,
 }
 
 impl StoreConfig {

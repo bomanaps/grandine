@@ -298,6 +298,16 @@ where
         }
     }
 
+    /// Explicitly triggers one FCR cycle (`on_fast_confirmation`) without a tick event.
+    /// Used in FCR spec tests (`fcr_spec_test_mode = true`) to match the pyspec's model where
+    /// FCR runs exactly once per `checks:` step, not automatically on every slot tick.
+    pub fn run_fast_confirmation(&self) {
+        MutatorMessage::RunFastConfirmation {
+            wait_group: self.owned_wait_group(),
+        }
+        .send(&self.mutator_tx);
+    }
+
     pub fn on_back_sync_status(&self, is_back_synced: bool) {
         MutatorMessage::BackSyncStatus {
             wait_group: self.owned_wait_group(),

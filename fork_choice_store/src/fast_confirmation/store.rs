@@ -343,7 +343,9 @@ impl<P: Preset> FastConfirmationStore<P> {
                     store.fcr_build_ffg_data(self.honest_ffg_support, &ffg_balances, ffg_total);
                 (chain, ffg)
             }
-            _ => return confirmed_root,
+            _ => {
+                return confirmed_root;
+            }
         };
 
         let prev_head_voting_source_epoch = store

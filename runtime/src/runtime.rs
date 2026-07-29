@@ -1364,6 +1364,7 @@ pub fn run(parsed_args: GrandineArgs) -> Result<()> {
         sync_without_reconstruction,
         fast_confirmation_rule,
         trust_all_signatures: false,
+        fcr_spec_test_mode: false,
     };
 
     let eth1_auth = Arc::new(Auth::new(auth_options)?);

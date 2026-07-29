@@ -84,6 +84,7 @@ impl<P: Preset> Context<P> {
             true,
             false,
             false,
+            false,
         ))
     }
 
@@ -101,6 +102,7 @@ impl<P: Preset> Context<P> {
             true,
             true,
             false,
+            false,
         ))
     }
 
@@ -113,6 +115,7 @@ impl<P: Preset> Context<P> {
         optimistic_merge_block_validation: bool,
         fast_confirmation_rule: bool,
         trust_all_signatures: bool,
+        fcr_spec_test_mode: bool,
     ) -> Self {
         let (service_tx, service_rx) = futures::channel::mpsc::unbounded();
 
@@ -135,6 +138,7 @@ impl<P: Preset> Context<P> {
             p2p_tx,
             fast_confirmation_rule,
             trust_all_signatures,
+            fcr_spec_test_mode,
         );
 
         if phase.is_peerdas_activated() {
@@ -343,6 +347,13 @@ impl<P: Preset> Context<P> {
             graffiti,
         )
         .expect("block should be constructed successfully")
+    }
+
+    /// Explicitly runs one FCR cycle and waits for it to complete.
+    /// Only meaningful when `fcr_spec_test_mode` is active (FCR spec tests).
+    pub fn run_fast_confirmation(&mut self) {
+        self.controller().run_fast_confirmation();
+        self.controller().wait_for_tasks();
     }
 
     pub fn on_tick(&mut self, tick: Tick) {

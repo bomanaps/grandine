@@ -163,6 +163,7 @@ async fn run_case<P: Preset>(config: &Arc<Config>, case: Case<'_>) {
         false,
         false,
         false,
+        false,
     );
 
     let mut last_payload_status: Option<PayloadStatusWithBlockHash> = None;

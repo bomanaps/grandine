@@ -214,6 +214,7 @@ impl<P: Preset> TestController<P> {
             futures::sink::drain(),
             false,
             false,
+            false,
         )
     }
 
@@ -226,10 +227,12 @@ impl<P: Preset> TestController<P> {
         p2p_tx: impl UnboundedSink<P2pMessage<P>>,
         fast_confirmation_rule: bool,
         trust_all_signatures: bool,
+        fcr_spec_test_mode: bool,
     ) -> (Arc<Self>, MutatorHandle<P, WaitGroup>) {
         let store_config = StoreConfig {
             fast_confirmation_rule,
             trust_all_signatures,
+            fcr_spec_test_mode,
             ..StoreConfig::aggressive(&chain_config)
         };
 
